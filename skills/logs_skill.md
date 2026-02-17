@@ -1,0 +1,1 @@
+Create `logs/` directory and an empty `logs/events.jsonl` file (or ensure it gets created on first log write). Log format must be JSONL (one JSON object per line).
