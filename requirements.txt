@@ -3,3 +3,6 @@ uvicorn
 python-dotenv
 pyodbc
 sqlglot
+sqlalchemy
+langchain
+langchain-openai

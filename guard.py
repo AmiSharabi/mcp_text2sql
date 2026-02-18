@@ -20,6 +20,17 @@ def _sql_max_rows() -> int:
     return value
 
 
+def _sql_max_tables() -> int:
+    raw = os.getenv('SQL_MAX_TABLES', '3')
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError('Invalid SQL_MAX_TABLES configuration.') from exc
+    if value <= 0:
+        raise ValueError('Invalid SQL_MAX_TABLES configuration.')
+    return value
+
+
 def _contains_multi_statement(sql: str) -> bool:
     stripped = sql.strip()
     if ';' in stripped[:-1]:
@@ -44,6 +55,30 @@ def _inject_top_clause(sql: str, max_rows: int) -> str:
     return re.sub(r'(?i)\bSELECT\b', f'SELECT TOP ({max_rows})', sql, count=1)
 
 
+def _table_key(table: exp.Table) -> str:
+    db = table.args.get('db')
+    table_name = table.args.get('this')
+    if table_name is None:
+        return table.sql(dialect='tsql').lower()
+    if db is not None:
+        return f'{db.sql(dialect="tsql")}.{table_name.sql(dialect="tsql")}'.lower()
+    return table_name.sql(dialect='tsql').lower()
+
+
+def _enforce_query_limits(parsed: exp.Expression) -> None:
+    max_tables = _sql_max_tables()
+    tables = {_table_key(t) for t in parsed.find_all(exp.Table)}
+    if len(tables) > max_tables:
+        raise ValueError(f'Query exceeds max table limit ({max_tables}).')
+
+    joins = len(list(parsed.find_all(exp.Join)))
+    subqueries = len(list(parsed.find_all(exp.Subquery)))
+    ctes = len(list(parsed.find_all(exp.CTE)))
+    complexity = joins + subqueries + ctes
+    if complexity > max_tables:
+        raise ValueError(f'Query exceeds max complexity limit ({max_tables}).')
+
+
 def sanitize_and_validate_sql(sql: str) -> str:
     if not isinstance(sql, str) or not sql.strip():
         raise ValueError('SQL must be a non-empty string.')
@@ -66,6 +101,8 @@ def sanitize_and_validate_sql(sql: str) -> str:
 
     if parsed.args.get('into') is not None:
         raise ValueError('SELECT INTO is not allowed.')
+
+    _enforce_query_limits(parsed)
 
     safe_sql = candidate.rstrip(';').strip()
     if not _has_top_clause(safe_sql):

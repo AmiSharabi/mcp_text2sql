@@ -1,51 +1,50 @@
 # MCP Text2SQL PoC (Local + Cloud Tunnel)
 
-Minimal read-only SQL Server MCP-style tool server with guardrails.
+Read-only SQL Server tool server with guardrails, built with FastAPI + SQLAlchemy.
 
-## Implemented
-- `mcp_server.py` (FastAPI entrypoint)
-- `tools.py` with exactly 3 tools:
-  - `get_schema`
-  - `execute_readonly_sql`
-  - `explain_reasoning`
-- `guard.py` strict SELECT-only validation/sanitization
-- `db_connection.py` SQL Server connection helper
-- `logger.py` JSONL logging to `LOG_PATH`
+## Implemented tools
+- `get_schema`:
+  - returns `tables`, `views`, and detected foreign-key `relationships` with data types
+- `execute_readonly_sql`:
+  - SELECT-only execution with guardrails
+  - enforces `TOP` and max table/query complexity
+- `explain_reasoning`
+- `preview_table`:
+  - returns first 5 rows for a requested table
 
 ## Endpoints
 - `POST /tools/get_schema`
 - `POST /tools/execute_readonly_sql`
 - `POST /tools/explain_reasoning`
+- `POST /tools/preview_table`
 
-Each request uses `x-trace-id` if provided, otherwise server generates a UUID.
+## SQL safety limits
+- single statement only
+- SELECT-only root query
+- denylist for write/dangerous SQL keywords
+- `SELECT INTO` blocked
+- auto-add `TOP (SQL_MAX_ROWS)` when missing
+- max query scope controlled by `SQL_MAX_TABLES` (tables/joins/subqueries/CTEs)
 
 ## Security check
-- Tool endpoints support API-key auth using env `MCP_API_KEY`.
+- Tool endpoints support API-key auth via `MCP_API_KEY`.
 - Send one of:
   - `x-api-key: <MCP_API_KEY>`
   - `Authorization: Bearer <MCP_API_KEY>`
 - If `MCP_API_KEY` is empty, auth is disabled (local dev mode).
 
 ## Setup
-1. Install dependencies in venv:
-   - `python -m venv venv`
-   - `venv\\Scripts\\python.exe -m pip install -r requirements.txt`
-2. Copy `.env.example` to `.env` and set values.
-3. Run server:
-   - `venv\\Scripts\\python.exe mcp_server.py`
+1. `python -m venv venv`
+2. `venv\\Scripts\\python.exe -m pip install -r requirements.txt`
+3. Copy `.env.example` -> `.env` and set DB values.
+4. Run: `venv\\Scripts\\python.exe mcp_server.py`
 
-## Cloud GPT access (public URL)
-Cloud-hosted GPT cannot reach `127.0.0.1`. Expose your local server with HTTPS tunnel.
-
-Example with ngrok:
-1. Install ngrok and authenticate it.
-2. Run tunnel to local port:
-   - `ngrok http 8000`
-3. Use the generated `https://<id>.ngrok-free.app` URL in your GPT/MCP configuration.
-4. Configure auth header in your GPT/MCP client:
-   - `x-api-key: <MCP_API_KEY>`
+## Cloud GPT access
+Cloud GPT cannot access `127.0.0.1` directly. Expose your local server through HTTPS tunnel (example ngrok):
+1. `ngrok http 8000`
+2. Use generated `https://...` URL in GPT/MCP connector.
+3. Add auth header `x-api-key` with `MCP_API_KEY`.
 
 ## Logging
-- JSONL file at `logs/events.jsonl` by default.
-- Events include request/tool start/end, timings, and row counts.
-- Secrets are not logged.
+- JSONL: `logs/events.jsonl`
+- CSV export: `venv\\Scripts\\python.exe export_logs_csv.py`

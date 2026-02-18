@@ -1,0 +1,77 @@
+{
+  "tools": [
+    {
+      "name": "get_schema",
+      "description": "Returns database tables/views and their columns.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "execute_readonly_sql",
+      "description": "Executes a read-only SQL SELECT query against SQL Server. Use only after explicit user confirmation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sql": {
+            "type": "string",
+            "description": "A valid read-only SELECT query."
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "explain_reasoning",
+      "description": "Explains the planned SQL reasoning before execution.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "chosen_tables": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "chosen_tables",
+          "sql"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preview_table",
+      "description": "Returns first 5 rows from a table preview.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "table_name": {
+            "type": "string"
+          },
+          "schema_name": {
+            "type": "string",
+            "default": "dbo"
+          }
+        },
+        "required": [
+          "table_name"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
