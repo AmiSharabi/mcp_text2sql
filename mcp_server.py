@@ -1,4 +1,4 @@
-import os
+﻿import os
 import time
 import uuid
 import json
@@ -8,15 +8,25 @@ from typing import Any
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from logger import log_event
-from tools import execute_readonly_sql, explain_reasoning, get_schema, preview_table
+from src.logger import log_event
+from src.tools import (
+    execute_readonly_sql,
+    explain_reasoning,
+    get_schema,
+    preview_table,
+    download_readonly_sql_result,
+)
 
 
 load_dotenv()
 
 app = FastAPI(title='MCP Text2SQL Server', version='0.1.0')
+DOWNLOADS_DIR = Path(os.getenv('DOWNLOADS_DIR', 'logs/downloads'))
+DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount('/downloads', StaticFiles(directory=str(DOWNLOADS_DIR)), name='downloads')
 
 
 class ExecuteReadonlySqlRequest(BaseModel):
@@ -32,6 +42,12 @@ class ExplainReasoningRequest(BaseModel):
 class PreviewTableRequest(BaseModel):
     table_name: str = Field(..., min_length=1)
     schema_name: str = Field(default='dbo', min_length=1)
+
+
+class DownloadResultRequest(BaseModel):
+    sql: str = Field(..., min_length=1)
+    file_name: str | None = None
+    download_mode: str = Field(default='link', min_length=1)
 
 
 _DEFAULT_TOOLS_PATH = Path(__file__).with_name('mcp_tools.json')
@@ -76,17 +92,30 @@ def _trace_id_from_header(trace_id_header: str | None) -> str:
     return str(uuid.uuid4())
 
 
-def _log_request_start(trace_id: str, tool_name: str) -> None:
-    log_event({'trace_id': trace_id, 'event_type': 'request_start', 'tool_name': tool_name})
+def _log_request_start(trace_id: str, tool_name: str, user_prompt: str | None = None) -> None:
+    log_event(
+        {
+            'trace_id': trace_id,
+            'event_type': 'request_start',
+            'tool_name': tool_name,
+            'user_prompt': user_prompt,
+        }
+    )
 
 
-def _log_request_end(trace_id: str, tool_name: str, total_ms: int) -> None:
+def _log_request_end(
+    trace_id: str,
+    tool_name: str,
+    total_ms: int,
+    user_prompt: str | None = None,
+) -> None:
     log_event(
         {
             'trace_id': trace_id,
             'event_type': 'request_end',
             'tool_name': tool_name,
             'total_ms': total_ms,
+            'user_prompt': user_prompt,
         }
     )
 
@@ -150,14 +179,18 @@ def _mcp_error_response(request_id: Any, code: int, message: str) -> dict[str, A
 
 
 def _call_mcp_tool(name: str, arguments: dict[str, Any], trace_id: str) -> dict[str, Any]:
+    user_prompt = arguments.get('user_prompt')
+    if user_prompt is not None and not isinstance(user_prompt, str):
+        raise ValueError('"user_prompt" must be a string when provided')
+
     if name == 'get_schema':
-        return get_schema(trace_id)
+        return get_schema(trace_id, user_prompt=user_prompt or 'get schema')
 
     if name == 'execute_readonly_sql':
         sql = arguments.get('sql')
         if not isinstance(sql, str) or not sql.strip():
             raise ValueError('execute_readonly_sql requires non-empty "sql"')
-        return execute_readonly_sql(trace_id=trace_id, sql=sql)
+        return execute_readonly_sql(trace_id=trace_id, sql=sql, user_prompt=user_prompt or sql)
 
     if name == 'explain_reasoning':
         question = arguments.get('question')
@@ -176,6 +209,7 @@ def _call_mcp_tool(name: str, arguments: dict[str, Any], trace_id: str) -> dict[
             question=question,
             chosen_tables=chosen_tables,
             sql=sql,
+            user_prompt=user_prompt or question,
         )
 
     if name == 'preview_table':
@@ -185,7 +219,30 @@ def _call_mcp_tool(name: str, arguments: dict[str, Any], trace_id: str) -> dict[
             raise ValueError('preview_table requires non-empty "table_name"')
         if not isinstance(schema_name, str) or not schema_name.strip():
             raise ValueError('preview_table requires non-empty "schema_name"')
-        return preview_table(trace_id=trace_id, table_name=table_name, schema_name=schema_name)
+        return preview_table(
+            trace_id=trace_id,
+            table_name=table_name,
+            schema_name=schema_name,
+            user_prompt=user_prompt or f'preview {schema_name}.{table_name}',
+        )
+
+    if name == 'download_result':
+        sql = arguments.get('sql')
+        file_name = arguments.get('file_name')
+        download_mode = arguments.get('download_mode', 'link')
+        if not isinstance(sql, str) or not sql.strip():
+            raise ValueError('download_result requires non-empty "sql"')
+        if file_name is not None and not isinstance(file_name, str):
+            raise ValueError('download_result "file_name" must be string when provided')
+        if not isinstance(download_mode, str) or download_mode.strip().lower() not in {'link', 'base64'}:
+            raise ValueError('download_result "download_mode" must be "link" or "base64"')
+        return download_readonly_sql_result(
+            trace_id=trace_id,
+            sql=sql,
+            file_name=file_name,
+            download_mode=download_mode,
+            user_prompt=user_prompt or sql,
+        )
 
     raise ValueError(f'Unknown tool: {name}')
 
@@ -205,6 +262,7 @@ async def mcp_rpc(
 
     request_id = payload.get('id')
     method = payload.get('method')
+    header_user_prompt = request.headers.get('x-user-prompt')
 
     if method == 'tools/list':
         return {
@@ -227,10 +285,15 @@ async def mcp_rpc(
             arguments = {}
         if not isinstance(arguments, dict):
             return _mcp_error_response(request_id, -32602, 'Invalid tool arguments')
+        user_prompt = arguments.get('user_prompt')
+        if (not isinstance(user_prompt, str) or not user_prompt.strip()) and isinstance(header_user_prompt, str):
+            user_prompt = header_user_prompt
+        if user_prompt is not None and not isinstance(user_prompt, str):
+            return _mcp_error_response(request_id, -32602, '"user_prompt" must be string')
 
         trace_id = _trace_id_from_header(x_trace_id)
         started = time.perf_counter()
-        _log_request_start(trace_id, tool_name)
+        _log_request_start(trace_id, tool_name, user_prompt=user_prompt)
         try:
             tool_result = _call_mcp_tool(tool_name, arguments, trace_id)
         except ValueError as exc:
@@ -239,7 +302,7 @@ async def mcp_rpc(
             return _mcp_error_response(request_id, -32603, 'Internal server error')
         finally:
             total_ms = int((time.perf_counter() - started) * 1000)
-            _log_request_end(trace_id, tool_name, total_ms)
+            _log_request_end(trace_id, tool_name, total_ms, user_prompt=user_prompt)
 
         return {
             'jsonrpc': '2.0',
@@ -267,17 +330,18 @@ def post_get_schema(
     _enforce_auth(request)
     trace_id = _trace_id_from_header(x_trace_id)
     started = time.perf_counter()
-    _log_request_start(trace_id, 'get_schema')
+    req_prompt = 'get schema'
+    _log_request_start(trace_id, 'get_schema', user_prompt=req_prompt)
 
     try:
-        return get_schema(trace_id)
+        return get_schema(trace_id, user_prompt=req_prompt)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail='Internal server error') from exc
     finally:
         total_ms = int((time.perf_counter() - started) * 1000)
-        _log_request_end(trace_id, 'get_schema', total_ms)
+        _log_request_end(trace_id, 'get_schema', total_ms, user_prompt=req_prompt)
 
 
 @app.get('/tools/get_schema')
@@ -296,17 +360,18 @@ def post_execute_readonly_sql(
     _enforce_auth(request)
     trace_id = _trace_id_from_header(x_trace_id)
     started = time.perf_counter()
-    _log_request_start(trace_id, 'execute_readonly_sql')
+    req_prompt = body.sql
+    _log_request_start(trace_id, 'execute_readonly_sql', user_prompt=req_prompt)
 
     try:
-        return execute_readonly_sql(trace_id=trace_id, sql=body.sql)
+        return execute_readonly_sql(trace_id=trace_id, sql=body.sql, user_prompt=req_prompt)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail='Internal server error') from exc
     finally:
         total_ms = int((time.perf_counter() - started) * 1000)
-        _log_request_end(trace_id, 'execute_readonly_sql', total_ms)
+        _log_request_end(trace_id, 'execute_readonly_sql', total_ms, user_prompt=req_prompt)
 
 
 @app.get('/tools/execute_readonly_sql')
@@ -325,7 +390,8 @@ def post_explain_reasoning(
     _enforce_auth(request)
     trace_id = _trace_id_from_header(x_trace_id)
     started = time.perf_counter()
-    _log_request_start(trace_id, 'explain_reasoning')
+    req_prompt = body.question
+    _log_request_start(trace_id, 'explain_reasoning', user_prompt=req_prompt)
 
     try:
         return explain_reasoning(
@@ -333,6 +399,7 @@ def post_explain_reasoning(
             question=body.question,
             chosen_tables=body.chosen_tables,
             sql=body.sql,
+            user_prompt=req_prompt,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -340,7 +407,7 @@ def post_explain_reasoning(
         raise HTTPException(status_code=500, detail='Internal server error') from exc
     finally:
         total_ms = int((time.perf_counter() - started) * 1000)
-        _log_request_end(trace_id, 'explain_reasoning', total_ms)
+        _log_request_end(trace_id, 'explain_reasoning', total_ms, user_prompt=req_prompt)
 
 
 @app.get('/tools/explain_reasoning')
@@ -359,13 +426,15 @@ def post_preview_table(
     _enforce_auth(request)
     trace_id = _trace_id_from_header(x_trace_id)
     started = time.perf_counter()
-    _log_request_start(trace_id, 'preview_table')
+    req_prompt = f'preview {body.schema_name}.{body.table_name}'
+    _log_request_start(trace_id, 'preview_table', user_prompt=req_prompt)
 
     try:
         return preview_table(
             trace_id=trace_id,
             table_name=body.table_name,
             schema_name=body.schema_name,
+            user_prompt=req_prompt,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -373,13 +442,49 @@ def post_preview_table(
         raise HTTPException(status_code=500, detail='Internal server error') from exc
     finally:
         total_ms = int((time.perf_counter() - started) * 1000)
-        _log_request_end(trace_id, 'preview_table', total_ms)
+        _log_request_end(trace_id, 'preview_table', total_ms, user_prompt=req_prompt)
 
 
 @app.get('/tools/preview_table')
 @app.get('/tools/preview_table/')
 def get_preview_table_hint() -> dict[str, str]:
     return _post_only_hint('preview_table')
+
+
+@app.post('/tools/download_result')
+@app.post('/tools/download_result/')
+def post_download_result(
+    request: Request,
+    body: DownloadResultRequest,
+    x_trace_id: str | None = Header(default=None, alias='x-trace-id'),
+) -> dict[str, Any]:
+    _enforce_auth(request)
+    trace_id = _trace_id_from_header(x_trace_id)
+    started = time.perf_counter()
+    req_prompt = body.sql
+    _log_request_start(trace_id, 'download_result', user_prompt=req_prompt)
+
+    try:
+        return download_readonly_sql_result(
+            trace_id=trace_id,
+            sql=body.sql,
+            file_name=body.file_name,
+            download_mode=body.download_mode,
+            user_prompt=req_prompt,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail='Internal server error') from exc
+    finally:
+        total_ms = int((time.perf_counter() - started) * 1000)
+        _log_request_end(trace_id, 'download_result', total_ms, user_prompt=req_prompt)
+
+
+@app.get('/tools/download_result')
+@app.get('/tools/download_result/')
+def get_download_result_hint() -> dict[str, str]:
+    return _post_only_hint('download_result')
 
 
 def main() -> None:

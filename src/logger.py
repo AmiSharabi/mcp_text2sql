@@ -16,11 +16,20 @@ def _truncate_sql_preview(value: str, max_len: int = 200) -> str:
     return text[:max_len] + '...'
 
 
+def _truncate_text(value: str, max_len: int = 400) -> str:
+    text = ' '.join(value.split())
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + '...'
+
+
 def _sanitize_event(event: dict[str, Any]) -> dict[str, Any]:
     clean = dict(event)
 
     if 'sql_preview' in clean and isinstance(clean['sql_preview'], str):
         clean['sql_preview'] = _truncate_sql_preview(clean['sql_preview'])
+    if 'user_prompt' in clean and isinstance(clean['user_prompt'], str):
+        clean['user_prompt'] = _truncate_text(clean['user_prompt'])
 
     for key in list(clean.keys()):
         key_l = key.lower()

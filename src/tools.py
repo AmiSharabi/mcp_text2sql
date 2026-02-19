@@ -1,13 +1,18 @@
 import os
 import re
 import time
+import csv
+import uuid
+import io
+import base64
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import text
 
-from db_connection import get_connection
-from guard import sanitize_and_validate_sql
-from logger import log_event
+from src.db_connection import get_connection
+from src.guard import sanitize_and_validate_sql
+from src.logger import log_event
 
 _SCHEMA_CACHE: dict[str, Any] = {
     'expires_at': 0.0,
@@ -41,9 +46,16 @@ def _rows_to_dicts(rows: list[Any]) -> list[dict[str, Any]]:
     return [dict(row._mapping) for row in rows]
 
 
-def get_schema(trace_id: str) -> dict[str, Any]:
+def get_schema(trace_id: str, user_prompt: str | None = None) -> dict[str, Any]:
     started = time.perf_counter()
-    log_event({'trace_id': trace_id, 'event_type': 'tool_start', 'tool_name': 'get_schema'})
+    log_event(
+        {
+            'trace_id': trace_id,
+            'event_type': 'tool_start',
+            'tool_name': 'get_schema',
+            'user_prompt': user_prompt,
+        }
+    )
 
     try:
         now = time.time()
@@ -56,6 +68,7 @@ def get_schema(trace_id: str) -> dict[str, Any]:
                     'event_type': 'tool_ok',
                     'tool_name': 'get_schema',
                     'agent_think_ms': payload['agent_think_ms'],
+                    'user_prompt': user_prompt,
                 }
             )
             return payload
@@ -156,6 +169,7 @@ def get_schema(trace_id: str) -> dict[str, Any]:
                 'event_type': 'tool_ok',
                 'tool_name': 'get_schema',
                 'agent_think_ms': payload_with_timing['agent_think_ms'],
+                'user_prompt': user_prompt,
             }
         )
         return payload_with_timing
@@ -166,18 +180,20 @@ def get_schema(trace_id: str) -> dict[str, Any]:
                 'event_type': 'tool_error',
                 'tool_name': 'get_schema',
                 'error': str(exc),
+                'user_prompt': user_prompt,
             }
         )
         raise
 
 
-def execute_readonly_sql(trace_id: str, sql: str) -> dict[str, Any]:
+def execute_readonly_sql(trace_id: str, sql: str, user_prompt: str | None = None) -> dict[str, Any]:
     log_event(
         {
             'trace_id': trace_id,
             'event_type': 'tool_start',
             'tool_name': 'execute_readonly_sql',
             'sql_preview': sql,
+            'user_prompt': user_prompt or sql,
         }
     )
 
@@ -213,6 +229,7 @@ def execute_readonly_sql(trace_id: str, sql: str) -> dict[str, Any]:
                 'sql_exec_ms': sql_exec_ms,
                 'row_count': len(row_dicts),
                 'sql_preview': sql_safe,
+                'user_prompt': user_prompt or sql,
             }
         )
         return response
@@ -229,18 +246,25 @@ def execute_readonly_sql(trace_id: str, sql: str) -> dict[str, Any]:
                 'sql_exec_ms': sql_exec_ms,
                 'error': str(exc),
                 'sql_preview': locals().get('sql_safe', sql),
+                'user_prompt': user_prompt or sql,
             }
         )
         raise
 
 
-def preview_table(trace_id: str, table_name: str, schema_name: str = 'dbo') -> dict[str, Any]:
+def preview_table(
+    trace_id: str,
+    table_name: str,
+    schema_name: str = 'dbo',
+    user_prompt: str | None = None,
+) -> dict[str, Any]:
     log_event(
         {
             'trace_id': trace_id,
             'event_type': 'tool_start',
             'tool_name': 'preview_table',
             'sql_preview': f'{schema_name}.{table_name}',
+            'user_prompt': user_prompt or f'preview {schema_name}.{table_name}',
         }
     )
 
@@ -277,6 +301,7 @@ def preview_table(trace_id: str, table_name: str, schema_name: str = 'dbo') -> d
                 'sql_exec_ms': sql_exec_ms,
                 'row_count': len(row_dicts),
                 'sql_preview': sql,
+                'user_prompt': user_prompt or f'preview {safe_schema}.{safe_table}',
             }
         )
         return response
@@ -288,14 +313,28 @@ def preview_table(trace_id: str, table_name: str, schema_name: str = 'dbo') -> d
                 'tool_name': 'preview_table',
                 'error': str(exc),
                 'sql_preview': f'{schema_name}.{table_name}',
+                'user_prompt': user_prompt or f'preview {schema_name}.{table_name}',
             }
         )
         raise
 
 
-def explain_reasoning(trace_id: str, question: str, chosen_tables: list[str], sql: str) -> dict[str, Any]:
+def explain_reasoning(
+    trace_id: str,
+    question: str,
+    chosen_tables: list[str],
+    sql: str,
+    user_prompt: str | None = None,
+) -> dict[str, Any]:
     started = time.perf_counter()
-    log_event({'trace_id': trace_id, 'event_type': 'tool_start', 'tool_name': 'explain_reasoning'})
+    log_event(
+        {
+            'trace_id': trace_id,
+            'event_type': 'tool_start',
+            'tool_name': 'explain_reasoning',
+            'user_prompt': user_prompt or question,
+        }
+    )
 
     try:
         sql_upper = sql.upper()
@@ -324,6 +363,7 @@ def explain_reasoning(trace_id: str, question: str, chosen_tables: list[str], sq
                 'event_type': 'tool_ok',
                 'tool_name': 'explain_reasoning',
                 'agent_think_ms': response['agent_think_ms'],
+                'user_prompt': user_prompt or question,
             }
         )
         return response
@@ -334,6 +374,134 @@ def explain_reasoning(trace_id: str, question: str, chosen_tables: list[str], sq
                 'event_type': 'tool_error',
                 'tool_name': 'explain_reasoning',
                 'error': str(exc),
+                'user_prompt': user_prompt or question,
+            }
+        )
+        raise
+
+
+def _downloads_dir() -> Path:
+    path = Path(os.getenv('DOWNLOADS_DIR', 'logs/downloads'))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_csv_filename(file_name: str | None) -> str:
+    if isinstance(file_name, str) and file_name.strip():
+        base = re.sub(r'[^A-Za-z0-9._-]+', '_', file_name.strip())
+        if not base.lower().endswith('.csv'):
+            base += '.csv'
+        return base
+    return f'result_{uuid.uuid4().hex[:10]}.csv'
+
+
+def _csv_text(columns: list[str], row_dicts: list[dict[str, Any]]) -> str:
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=columns)
+    writer.writeheader()
+    for row in row_dicts:
+        writer.writerow(row)
+    return buffer.getvalue()
+
+
+def download_readonly_sql_result(
+    trace_id: str,
+    sql: str,
+    file_name: str | None = None,
+    download_mode: str = 'link',
+    user_prompt: str | None = None,
+) -> dict[str, Any]:
+    log_event(
+        {
+            'trace_id': trace_id,
+            'event_type': 'tool_start',
+            'tool_name': 'download_result',
+            'sql_preview': sql,
+            'download_mode': download_mode,
+            'user_prompt': user_prompt or sql,
+        }
+    )
+
+    try:
+        mode = download_mode.strip().lower() if isinstance(download_mode, str) else ''
+        if mode not in {'link', 'base64'}:
+            raise ValueError('download_mode must be "link" or "base64".')
+
+        think_started = time.perf_counter()
+        sql_safe = sanitize_and_validate_sql(sql)
+        agent_think_ms = int((time.perf_counter() - think_started) * 1000)
+
+        exec_started = time.perf_counter()
+        timeout_s = _int_env('SQL_TIMEOUT_SECONDS', 10)
+        with get_connection() as conn:
+            result = conn.execution_options(query_timeout=timeout_s).execute(text(sql_safe))
+            columns = list(result.keys())
+            rows = result.fetchall()
+        sql_exec_ms = int((time.perf_counter() - exec_started) * 1000)
+
+        row_dicts = _rows_to_dicts(rows)
+        out_name = _safe_csv_filename(file_name)
+        write_started = time.perf_counter()
+        csv_text = _csv_text(columns, row_dicts)
+        file_write_ms = 0
+
+        relative_url = None
+        download_url = None
+        content_base64 = None
+        if mode == 'link':
+            out_file = _downloads_dir() / out_name
+            out_file.write_text(csv_text, encoding='utf-8', newline='')
+            file_write_ms = int((time.perf_counter() - write_started) * 1000)
+            relative_url = f'/downloads/{out_name}'
+            base = os.getenv('MCP_PUBLIC_BASE_URL', '').strip().rstrip('/')
+            download_url = f'{base}{relative_url}' if base else relative_url
+        else:
+            content_base64 = base64.b64encode(csv_text.encode('utf-8')).decode('ascii')
+            file_write_ms = int((time.perf_counter() - write_started) * 1000)
+
+        response = {
+            'sql': sql_safe,
+            'row_count': len(row_dicts),
+            'download_mode': mode,
+            'file_name': out_name,
+            'download_url': download_url,
+            'download_path': relative_url,
+            'content_base64': content_base64,
+            'content_type': 'text/csv; charset=utf-8',
+            'agent_think_ms': agent_think_ms,
+            'sql_exec_ms': sql_exec_ms,
+            'file_write_ms': file_write_ms,
+        }
+
+        log_event(
+            {
+                'trace_id': trace_id,
+                'event_type': 'tool_ok',
+                'tool_name': 'download_result',
+                'agent_think_ms': agent_think_ms,
+                'sql_exec_ms': sql_exec_ms,
+                'row_count': len(row_dicts),
+                'sql_preview': sql_safe,
+                'download_mode': mode,
+                'user_prompt': user_prompt or sql,
+            }
+        )
+        return response
+    except Exception as exc:
+        current_time = time.perf_counter()
+        agent_think_ms = int((current_time - think_started) * 1000) if 'think_started' in locals() else 0
+        sql_exec_ms = int((current_time - exec_started) * 1000) if 'exec_started' in locals() else 0
+        log_event(
+            {
+                'trace_id': trace_id,
+                'event_type': 'tool_error',
+                'tool_name': 'download_result',
+                'agent_think_ms': agent_think_ms,
+                'sql_exec_ms': sql_exec_ms,
+                'error': str(exc),
+                'sql_preview': locals().get('sql_safe', sql),
+                'download_mode': locals().get('mode', download_mode),
+                'user_prompt': user_prompt or sql,
             }
         )
         raise

@@ -72,6 +72,38 @@
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "download_result",
+      "description": "Executes read-only SQL and saves the result as a downloadable CSV file.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sql": {
+            "type": "string"
+          },
+          "file_name": {
+            "type": "string",
+            "description": "Optional output CSV filename."
+          },
+          "download_mode": {
+            "type": "string",
+            "enum": [
+              "link",
+              "base64"
+            ],
+            "description": "link: save CSV on MCP server and return URL. base64: return CSV content inline as base64."
+          },
+          "user_prompt": {
+            "type": "string",
+            "description": "Optional original user prompt for logging."
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "additionalProperties": false
+      }
     }
   ]
 }
