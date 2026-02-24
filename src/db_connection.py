@@ -7,6 +7,7 @@ _ENGINE: Engine | None = None
 
 
 def _env(name: str, default: str | None = None) -> str:
+    # Read an environment variable and fail when required value is missing.
     import os
 
     value = os.getenv(name, default)
@@ -16,6 +17,7 @@ def _env(name: str, default: str | None = None) -> str:
 
 
 def _build_connection_url() -> str:
+    # Build the SQLAlchemy MSSQL/pyodbc connection URL from env settings.
     driver = _env('DB_DRIVER')
     host = _env('DB_HOST')
     db_name = _env('DB_NAME')
@@ -43,6 +45,7 @@ def _build_connection_url() -> str:
 
 
 def create_sql_engine() -> Engine:
+    # Create and cache a singleton SQLAlchemy engine.
     global _ENGINE
     if _ENGINE is None:
         _ENGINE = create_engine(_build_connection_url(), pool_pre_ping=True, future=True)
@@ -50,13 +53,16 @@ def create_sql_engine() -> Engine:
 
 
 def connect() -> Connection:
+    # Open and return a new DB connection from the shared engine.
     return create_sql_engine().connect()
 
 
 # Backward compatibility for existing imports.
 def get_engine() -> Engine:
+    # Return the shared engine (compatibility alias).
     return create_sql_engine()
 
 
 def get_connection() -> Connection:
+    # Return a DB connection (compatibility alias).
     return connect()

@@ -23,6 +23,7 @@ _IDENTIFIER_PATTERN = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 
 def _int_env(name: str, default: int) -> int:
+    # Read a positive integer from environment variables with validation.
     raw = os.getenv(name, str(default))
     try:
         value = int(raw)
@@ -34,6 +35,7 @@ def _int_env(name: str, default: int) -> int:
 
 
 def _validate_identifier(value: str, field_name: str) -> str:
+    # Validate SQL identifier input (schema/table) against a safe pattern.
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f'{field_name} is required.')
     candidate = value.strip()
@@ -43,10 +45,12 @@ def _validate_identifier(value: str, field_name: str) -> str:
 
 
 def _rows_to_dicts(rows: list[Any]) -> list[dict[str, Any]]:
+    # Convert SQLAlchemy row objects into plain dictionaries.
     return [dict(row._mapping) for row in rows]
 
 
 def get_schema(trace_id: str, user_prompt: str | None = None) -> dict[str, Any]:
+    # Return tables/views/relationships metadata, using short-lived cache.
     started = time.perf_counter()
     log_event(
         {
@@ -187,6 +191,7 @@ def get_schema(trace_id: str, user_prompt: str | None = None) -> dict[str, Any]:
 
 
 def execute_readonly_sql(trace_id: str, sql: str, user_prompt: str | None = None) -> dict[str, Any]:
+    # Validate and execute a read-only SQL query and return rows plus timings.
     log_event(
         {
             'trace_id': trace_id,
@@ -258,6 +263,7 @@ def preview_table(
     schema_name: str = 'dbo',
     user_prompt: str | None = None,
 ) -> dict[str, Any]:
+    # Return up to 5 rows from a validated schema.table for quick inspection.
     log_event(
         {
             'trace_id': trace_id,
@@ -326,6 +332,7 @@ def explain_reasoning(
     sql: str,
     user_prompt: str | None = None,
 ) -> dict[str, Any]:
+    # Build a lightweight explanation of SQL intent from question/tables/query.
     started = time.perf_counter()
     log_event(
         {
@@ -381,12 +388,14 @@ def explain_reasoning(
 
 
 def _downloads_dir() -> Path:
+    # Ensure and return the download directory path.
     path = Path(os.getenv('DOWNLOADS_DIR', 'logs/downloads'))
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _safe_csv_filename(file_name: str | None) -> str:
+    # Generate a safe CSV filename or fallback random result filename.
     if isinstance(file_name, str) and file_name.strip():
         base = re.sub(r'[^A-Za-z0-9._-]+', '_', file_name.strip())
         if not base.lower().endswith('.csv'):
@@ -396,6 +405,7 @@ def _safe_csv_filename(file_name: str | None) -> str:
 
 
 def _csv_text(columns: list[str], row_dicts: list[dict[str, Any]]) -> str:
+    # Serialize query rows to CSV text with header row.
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=columns)
     writer.writeheader()
@@ -411,6 +421,7 @@ def download_readonly_sql_result(
     download_mode: str = 'link',
     user_prompt: str | None = None,
 ) -> dict[str, Any]:
+    # Execute read-only SQL and return downloadable CSV as link or base64 content.
     log_event(
         {
             'trace_id': trace_id,

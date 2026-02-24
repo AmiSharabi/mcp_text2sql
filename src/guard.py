@@ -10,6 +10,7 @@ _DENYLIST_PATTERN = re.compile(
 
 
 def _sql_max_rows() -> int:
+    # Read and validate maximum rows limit for SELECT TOP enforcement.
     raw = os.getenv('SQL_MAX_ROWS', '200')
     try:
         value = int(raw)
@@ -21,6 +22,7 @@ def _sql_max_rows() -> int:
 
 
 def _sql_max_tables() -> int:
+    # Read and validate maximum table/complexity limit for query safety.
     raw = os.getenv('SQL_MAX_TABLES', '3')
     try:
         value = int(raw)
@@ -32,6 +34,7 @@ def _sql_max_tables() -> int:
 
 
 def _contains_multi_statement(sql: str) -> bool:
+    # Detect whether input contains more than one SQL statement.
     stripped = sql.strip()
     if ';' in stripped[:-1]:
         return True
@@ -44,18 +47,22 @@ def _contains_multi_statement(sql: str) -> bool:
 
 
 def _is_select_root(node: exp.Expression) -> bool:
+    # Check that parsed SQL root expression is a SELECT statement.
     return isinstance(node, exp.Select)
 
 
 def _has_top_clause(sql: str) -> bool:
+    # Check whether the SQL already includes a TOP clause.
     return re.search(r'(?i)\bSELECT\s+TOP\s*(\(|\d)', sql) is not None
 
 
 def _inject_top_clause(sql: str, max_rows: int) -> str:
+    # Inject TOP(max_rows) into the first SELECT when missing.
     return re.sub(r'(?i)\bSELECT\b', f'SELECT TOP ({max_rows})', sql, count=1)
 
 
 def _table_key(table: exp.Table) -> str:
+    # Build normalized table key for counting unique referenced tables.
     db = table.args.get('db')
     table_name = table.args.get('this')
     if table_name is None:
@@ -66,6 +73,7 @@ def _table_key(table: exp.Table) -> str:
 
 
 def _enforce_query_limits(parsed: exp.Expression) -> None:
+    # Enforce configured limits on table count and query complexity.
     max_tables = _sql_max_tables()
     tables = {_table_key(t) for t in parsed.find_all(exp.Table)}
     if len(tables) > max_tables:
@@ -80,6 +88,7 @@ def _enforce_query_limits(parsed: exp.Expression) -> None:
 
 
 def sanitize_and_validate_sql(sql: str) -> str:
+    # Validate read-only SQL safety rules and return sanitized executable SQL.
     if not isinstance(sql, str) or not sql.strip():
         raise ValueError('SQL must be a non-empty string.')
 

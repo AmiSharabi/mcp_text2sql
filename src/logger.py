@@ -6,10 +6,12 @@ from typing import Any
 
 
 def _now_iso() -> str:
+    # Return current UTC time in ISO-8601 format with Z suffix.
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 def _truncate_sql_preview(value: str, max_len: int = 200) -> str:
+    # Normalize whitespace and truncate SQL preview to safe log length.
     text = ' '.join(value.split())
     if len(text) <= max_len:
         return text
@@ -17,6 +19,7 @@ def _truncate_sql_preview(value: str, max_len: int = 200) -> str:
 
 
 def _truncate_text(value: str, max_len: int = 400) -> str:
+    # Normalize whitespace and truncate free text to safe log length.
     text = ' '.join(value.split())
     if len(text) <= max_len:
         return text
@@ -24,6 +27,7 @@ def _truncate_text(value: str, max_len: int = 400) -> str:
 
 
 def _sanitize_event(event: dict[str, Any]) -> dict[str, Any]:
+    # Remove sensitive fields and apply truncation before logging.
     clean = dict(event)
 
     if 'sql_preview' in clean and isinstance(clean['sql_preview'], str):
@@ -40,6 +44,7 @@ def _sanitize_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def log_event(event: dict[str, Any]) -> None:
+    # Append a sanitized JSON log event to the configured jsonl file.
     log_path = os.getenv('LOG_PATH', 'logs/events.jsonl')
     safe_event = _sanitize_event(event)
 
