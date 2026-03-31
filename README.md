@@ -66,8 +66,13 @@ Cloud models cannot call `127.0.0.1` directly.
 - `src/db_connection.py`
   - SQLAlchemy + SQL Server connection builder from `.env`
 - `src/logger.py`
-  - JSONL event logging to `LOG_PATH`
+  - event logging sink (`file` / `sql` / `both`)
+  - SQL sink writes to SQL Server table (default target: `mcp_logging.events`)
   - truncates/sanitizes fields (including `user_prompt`)
+- `logs/sql/001_create_mcp_logging.sql`
+  - SQL Server script to create logging schema/table/indexes/views
+- `logs/sql/002_mcp_logging_analysis_queries.sql`
+  - ready-to-run SQL queries for traces/sessions/errors/performance analysis
 - `mcp_tools.json`
   - MCP tool definitions returned by `tools/list`
 - `logs/export_logs_csv.py`
@@ -81,6 +86,13 @@ Cloud models cannot call `127.0.0.1` directly.
 
 ## Logs and Export
 - JSONL runtime log (original): `logs/events.jsonl`
+- SQL log sink:
+  - run `logs/sql/001_create_mcp_logging.sql` on the target SQL Server database
+  - set `.env`:
+    - `LOG_SINK=sql` (SQL only) or `LOG_SINK=both` (SQL + JSONL)
+    - optional dedicated SQL log connection via `LOG_DB_*`
+    - default table target: `LOG_DB_SCHEMA=mcp_logging`, `LOG_DB_TABLE=events`
+  - if SQL insert fails, logger writes fallback JSONL to `LOG_SQL_FALLBACK_PATH`
 - Export logs with:
   - `venv\\Scripts\\python.exe logs/export_logs_csv.py`
 - Optional custom output paths:

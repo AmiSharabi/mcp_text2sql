@@ -4,7 +4,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import uvicorn
 from dotenv import load_dotenv
@@ -38,6 +38,36 @@ app = FastAPI(title='MCP Text2SQL Server', version='0.1.0')
 DOWNLOADS_DIR = Path(os.getenv('DOWNLOADS_DIR', 'logs/downloads'))
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount('/downloads', StaticFiles(directory=str(DOWNLOADS_DIR)), name='downloads')
+
+
+def _run_http_tool_endpoint(
+    request: Request,
+    x_trace_id: str | None,
+    tool_name: str,
+    user_prompt: str,
+    runner: Callable[[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    # Run a tool endpoint with shared auth, timing, logging, and HTTP error mapping.
+    enforce_auth(request)
+    trace_id = trace_id_from_header(x_trace_id)
+    started = time.perf_counter()
+    log_request_start(trace_id, tool_name, user_prompt=user_prompt, transport='http_tool')
+
+    try:
+        return runner(trace_id, user_prompt)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail='Internal server error') from exc
+    finally:
+        total_ms = int((time.perf_counter() - started) * 1000)
+        log_request_end(
+            trace_id,
+            tool_name,
+            total_ms,
+            user_prompt=user_prompt,
+            transport='http_tool',
+        )
 
 
 @app.get('/')
@@ -219,21 +249,14 @@ def post_get_schema(
     x_trace_id: str | None = Header(default=None, alias='x-trace-id'),
 ) -> dict[str, Any]:
     # Execute the get_schema tool over plain HTTP endpoint.
-    enforce_auth(request)
-    trace_id = trace_id_from_header(x_trace_id)
-    started = time.perf_counter()
     req_prompt = 'get schema'
-    log_request_start(trace_id, 'get_schema', user_prompt=req_prompt, transport='http_tool')
-
-    try:
-        return get_schema(trace_id, user_prompt=req_prompt)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail='Internal server error') from exc
-    finally:
-        total_ms = int((time.perf_counter() - started) * 1000)
-        log_request_end(trace_id, 'get_schema', total_ms, user_prompt=req_prompt, transport='http_tool')
+    return _run_http_tool_endpoint(
+        request=request,
+        x_trace_id=x_trace_id,
+        tool_name='get_schema',
+        user_prompt=req_prompt,
+        runner=lambda trace_id, user_prompt: get_schema(trace_id, user_prompt=user_prompt),
+    )
 
 
 @app.get('/tools/get_schema')
@@ -251,21 +274,18 @@ def post_execute_readonly_sql(
     x_trace_id: str | None = Header(default=None, alias='x-trace-id'),
 ) -> dict[str, Any]:
     # Execute the execute_readonly_sql tool over plain HTTP endpoint.
-    enforce_auth(request)
-    trace_id = trace_id_from_header(x_trace_id)
-    started = time.perf_counter()
     req_prompt = body.sql
-    log_request_start(trace_id, 'execute_readonly_sql', user_prompt=req_prompt, transport='http_tool')
-
-    try:
-        return execute_readonly_sql(trace_id=trace_id, sql=body.sql, user_prompt=req_prompt)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail='Internal server error') from exc
-    finally:
-        total_ms = int((time.perf_counter() - started) * 1000)
-        log_request_end(trace_id, 'execute_readonly_sql', total_ms, user_prompt=req_prompt, transport='http_tool')
+    return _run_http_tool_endpoint(
+        request=request,
+        x_trace_id=x_trace_id,
+        tool_name='execute_readonly_sql',
+        user_prompt=req_prompt,
+        runner=lambda trace_id, user_prompt: execute_readonly_sql(
+            trace_id=trace_id,
+            sql=body.sql,
+            user_prompt=user_prompt,
+        ),
+    )
 
 
 @app.get('/tools/execute_readonly_sql')
@@ -283,27 +303,20 @@ def post_explain_reasoning(
     x_trace_id: str | None = Header(default=None, alias='x-trace-id'),
 ) -> dict[str, Any]:
     # Execute the explain_reasoning tool over plain HTTP endpoint.
-    enforce_auth(request)
-    trace_id = trace_id_from_header(x_trace_id)
-    started = time.perf_counter()
     req_prompt = body.question
-    log_request_start(trace_id, 'explain_reasoning', user_prompt=req_prompt, transport='http_tool')
-
-    try:
-        return explain_reasoning(
+    return _run_http_tool_endpoint(
+        request=request,
+        x_trace_id=x_trace_id,
+        tool_name='explain_reasoning',
+        user_prompt=req_prompt,
+        runner=lambda trace_id, user_prompt: explain_reasoning(
             trace_id=trace_id,
             question=body.question,
             chosen_tables=body.chosen_tables,
             sql=body.sql,
-            user_prompt=req_prompt,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail='Internal server error') from exc
-    finally:
-        total_ms = int((time.perf_counter() - started) * 1000)
-        log_request_end(trace_id, 'explain_reasoning', total_ms, user_prompt=req_prompt, transport='http_tool')
+            user_prompt=user_prompt,
+        ),
+    )
 
 
 @app.get('/tools/explain_reasoning')
@@ -321,26 +334,19 @@ def post_preview_table(
     x_trace_id: str | None = Header(default=None, alias='x-trace-id'),
 ) -> dict[str, Any]:
     # Execute the preview_table tool over plain HTTP endpoint.
-    enforce_auth(request)
-    trace_id = trace_id_from_header(x_trace_id)
-    started = time.perf_counter()
     req_prompt = f'preview {body.schema_name}.{body.table_name}'
-    log_request_start(trace_id, 'preview_table', user_prompt=req_prompt, transport='http_tool')
-
-    try:
-        return preview_table(
+    return _run_http_tool_endpoint(
+        request=request,
+        x_trace_id=x_trace_id,
+        tool_name='preview_table',
+        user_prompt=req_prompt,
+        runner=lambda trace_id, user_prompt: preview_table(
             trace_id=trace_id,
             table_name=body.table_name,
             schema_name=body.schema_name,
-            user_prompt=req_prompt,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail='Internal server error') from exc
-    finally:
-        total_ms = int((time.perf_counter() - started) * 1000)
-        log_request_end(trace_id, 'preview_table', total_ms, user_prompt=req_prompt, transport='http_tool')
+            user_prompt=user_prompt,
+        ),
+    )
 
 
 @app.get('/tools/preview_table')
@@ -358,27 +364,20 @@ def post_download_result(
     x_trace_id: str | None = Header(default=None, alias='x-trace-id'),
 ) -> dict[str, Any]:
     # Execute the download_result tool over plain HTTP endpoint.
-    enforce_auth(request)
-    trace_id = trace_id_from_header(x_trace_id)
-    started = time.perf_counter()
     req_prompt = body.sql
-    log_request_start(trace_id, 'download_result', user_prompt=req_prompt, transport='http_tool')
-
-    try:
-        return download_readonly_sql_result(
+    return _run_http_tool_endpoint(
+        request=request,
+        x_trace_id=x_trace_id,
+        tool_name='download_result',
+        user_prompt=req_prompt,
+        runner=lambda trace_id, user_prompt: download_readonly_sql_result(
             trace_id=trace_id,
             sql=body.sql,
             file_name=body.file_name,
             download_mode=body.download_mode,
-            user_prompt=req_prompt,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail='Internal server error') from exc
-    finally:
-        total_ms = int((time.perf_counter() - started) * 1000)
-        log_request_end(trace_id, 'download_result', total_ms, user_prompt=req_prompt, transport='http_tool')
+            user_prompt=user_prompt,
+        ),
+    )
 
 
 @app.get('/tools/download_result')

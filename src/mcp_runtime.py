@@ -168,11 +168,32 @@ def _format_tool_output_text(tool_name: str, tool_result: dict[str, Any]) -> str
         value = tool_result.get(key)
         if isinstance(value, int):
             parts.append(f'{key}={value}')
+
+    # Include only small scalar hints in text content to avoid duplicating large payloads.
+    for key in ('table', 'file_name', 'download_mode', 'download_url'):
+        value = tool_result.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f'{key}={value.strip()}')
+
+    rows = tool_result.get('rows')
+    if isinstance(rows, list):
+        parts.append(f'rows_in_structured_content={len(rows)}')
+
+    tables = tool_result.get('tables')
+    views = tool_result.get('views')
+    relationships = tool_result.get('relationships')
+    if isinstance(tables, dict):
+        parts.append(f'tables_in_structured_content={len(tables)}')
+    if isinstance(views, dict):
+        parts.append(f'views_in_structured_content={len(views)}')
+    if isinstance(relationships, list):
+        parts.append(f'relationships_in_structured_content={len(relationships)}')
+
     summary = f'{tool_name} completed'
     if parts:
         summary += ' | ' + ', '.join(parts)
 
-    return summary + '\n' + json.dumps(tool_result, ensure_ascii=True)
+    return summary
 
 
 def call_mcp_tool(name: str, arguments: dict[str, Any], trace_id: str) -> dict[str, Any]:
