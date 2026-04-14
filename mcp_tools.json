@@ -5,6 +5,20 @@
       "description": "Returns database tables/views and their columns.",
       "inputSchema": {
         "type": "object",
+        "properties": {
+          "database": {
+            "type": "string",
+            "description": "Optional database profile name from list_databases."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "list_databases",
+      "description": "Lists available database profiles that can be used by SQL tools.",
+      "inputSchema": {
+        "type": "object",
         "properties": {},
         "additionalProperties": false
       }
@@ -18,6 +32,10 @@
           "sql": {
             "type": "string",
             "description": "A valid read-only SELECT query."
+          },
+          "database": {
+            "type": "string",
+            "description": "Optional database profile name from list_databases."
           }
         },
         "required": [
@@ -65,6 +83,10 @@
           "schema_name": {
             "type": "string",
             "default": "dbo"
+          },
+          "database": {
+            "type": "string",
+            "description": "Optional database profile name from list_databases."
           }
         },
         "required": [
@@ -94,6 +116,10 @@
             ],
             "description": "link: save CSV on MCP server and return URL. base64: return CSV content inline as base64."
           },
+          "database": {
+            "type": "string",
+            "description": "Optional database profile name from list_databases."
+          },
           "user_prompt": {
             "type": "string",
             "description": "Optional original user prompt for logging."
@@ -101,6 +127,132 @@
         },
         "required": [
           "sql"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "build_chart",
+      "description": "Executes read-only SQL and returns chart-ready structured content (Vega-Lite spec + dataset).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sql": {
+            "type": "string",
+            "description": "A valid read-only SELECT query for chart data."
+          },
+          "chart_type": {
+            "type": "string",
+            "enum": [
+              "bar",
+              "line",
+              "area",
+              "pie",
+              "scatter"
+            ],
+            "default": "bar"
+          },
+          "x_field": {
+            "type": "string"
+          },
+          "y_field": {
+            "type": "string"
+          },
+          "series_field": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "database": {
+            "type": "string",
+            "description": "Optional database profile name from list_databases."
+          },
+          "user_prompt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "build_dashboard",
+      "description": "Builds a dashboard payload from multiple SQL widgets (kpi, chart, table).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "widgets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "kpi",
+                    "chart",
+                    "table"
+                  ]
+                },
+                "title": {
+                  "type": "string"
+                },
+                "sql": {
+                  "type": "string"
+                },
+                "chart_type": {
+                  "type": "string",
+                  "enum": [
+                    "bar",
+                    "line",
+                    "area",
+                    "pie",
+                    "scatter"
+                  ]
+                },
+                "x_field": {
+                  "type": "string"
+                },
+                "y_field": {
+                  "type": "string"
+                },
+                "series_field": {
+                  "type": "string"
+                },
+                "value_field": {
+                  "type": "string"
+                },
+                "table_limit": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "sql"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1
+          },
+          "database": {
+            "type": "string",
+            "description": "Optional database profile name from list_databases."
+          },
+          "user_prompt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "widgets"
         ],
         "additionalProperties": false
       }

@@ -10,10 +10,13 @@ from fastapi import HTTPException, Request
 
 from src.logger import log_event
 from src.tools import (
+    build_chart,
+    build_dashboard,
     download_readonly_sql_result,
     execute_readonly_sql,
     explain_reasoning,
     get_schema,
+    list_databases,
     preview_table,
 )
 
@@ -164,13 +167,22 @@ def _finalize_tool_result(tool_result: Any, total_ms: int) -> dict[str, Any]:
 def _format_tool_output_text(tool_name: str, tool_result: dict[str, Any]) -> str:
     # Build a compact human-readable summary for MCP TextContent output.
     parts = []
-    for key in ('total_ms', 'agent_think_ms', 'sql_exec_ms', 'row_count'):
+    for key in (
+        'total_ms',
+        'agent_think_ms',
+        'sql_exec_ms',
+        'row_count',
+        'widget_count',
+        'kpi_count',
+        'chart_count',
+        'table_count',
+    ):
         value = tool_result.get(key)
         if isinstance(value, int):
             parts.append(f'{key}={value}')
 
     # Include only small scalar hints in text content to avoid duplicating large payloads.
-    for key in ('table', 'file_name', 'download_mode', 'download_url'):
+    for key in ('table', 'file_name', 'download_mode', 'download_url', 'result_type', 'chart_type', 'database'):
         value = tool_result.get(key)
         if isinstance(value, str) and value.strip():
             parts.append(f'{key}={value.strip()}')
@@ -196,20 +208,67 @@ def _format_tool_output_text(tool_name: str, tool_result: dict[str, Any]) -> str
     return summary
 
 
+def _log_tool_call_result(
+    trace_id: str,
+    request_id: Any,
+    tool_name: str,
+    call_arguments: dict[str, Any],
+    user_prompt: str | None,
+    session_id: str | None,
+    transport: str,
+    total_ms: int,
+    tool_result: dict[str, Any] | None = None,
+    error_code: int | None = None,
+    error_message: str | None = None,
+) -> None:
+    # Persist a detailed tool call outcome event for observability.
+    payload: dict[str, Any] = {
+        'trace_id': trace_id,
+        'request_id': request_id,
+        'event_type': 'tool_result' if error_code is None else 'tool_result_error',
+        'tool_name': tool_name,
+        'tool_arguments': call_arguments,
+        'user_prompt': user_prompt,
+        'session_id': session_id,
+        'transport': transport,
+        'total_ms': total_ms,
+    }
+    if tool_result is not None:
+        payload['tool_result'] = tool_result
+    if error_code is not None:
+        payload['error_code'] = error_code
+    if error_message is not None:
+        payload['error'] = error_message
+    log_event(payload)
+
+
 def call_mcp_tool(name: str, arguments: dict[str, Any], trace_id: str) -> dict[str, Any]:
     # Dispatch supported MCP tool names to internal tool implementations.
     user_prompt = arguments.get('user_prompt')
     if user_prompt is not None and not isinstance(user_prompt, str):
         raise ValueError('"user_prompt" must be a string when provided')
 
+    database = arguments.get('database')
+    if database is not None and not isinstance(database, str):
+        raise ValueError('"database" must be a string when provided')
+    selected_database = database.strip() if isinstance(database, str) and database.strip() else None
+
+    if name == 'list_databases':
+        return list_databases(trace_id, user_prompt=user_prompt or 'list databases')
+
     if name == 'get_schema':
-        return get_schema(trace_id, user_prompt=user_prompt or 'get schema')
+        return get_schema(trace_id, user_prompt=user_prompt or 'get schema', database=selected_database)
 
     if name == 'execute_readonly_sql':
         sql = arguments.get('sql')
         if not isinstance(sql, str) or not sql.strip():
             raise ValueError('execute_readonly_sql requires non-empty "sql"')
-        return execute_readonly_sql(trace_id=trace_id, sql=sql, user_prompt=user_prompt or sql)
+        return execute_readonly_sql(
+            trace_id=trace_id,
+            sql=sql,
+            user_prompt=user_prompt or sql,
+            database=selected_database,
+        )
 
     if name == 'explain_reasoning':
         question = arguments.get('question')
@@ -243,6 +302,7 @@ def call_mcp_tool(name: str, arguments: dict[str, Any], trace_id: str) -> dict[s
             table_name=table_name,
             schema_name=schema_name,
             user_prompt=user_prompt or f'preview {schema_name}.{table_name}',
+            database=selected_database,
         )
 
     if name == 'download_result':
@@ -261,6 +321,55 @@ def call_mcp_tool(name: str, arguments: dict[str, Any], trace_id: str) -> dict[s
             file_name=file_name,
             download_mode=download_mode,
             user_prompt=user_prompt or sql,
+            database=selected_database,
+        )
+
+    if name == 'build_chart':
+        sql = arguments.get('sql')
+        chart_type = arguments.get('chart_type', 'bar')
+        x_field = arguments.get('x_field')
+        y_field = arguments.get('y_field')
+        series_field = arguments.get('series_field')
+        title = arguments.get('title')
+        if not isinstance(sql, str) or not sql.strip():
+            raise ValueError('build_chart requires non-empty "sql"')
+        if not isinstance(chart_type, str) or not chart_type.strip():
+            raise ValueError('build_chart requires non-empty "chart_type"')
+        if x_field is not None and not isinstance(x_field, str):
+            raise ValueError('build_chart "x_field" must be string when provided')
+        if y_field is not None and not isinstance(y_field, str):
+            raise ValueError('build_chart "y_field" must be string when provided')
+        if series_field is not None and not isinstance(series_field, str):
+            raise ValueError('build_chart "series_field" must be string when provided')
+        if title is not None and not isinstance(title, str):
+            raise ValueError('build_chart "title" must be string when provided')
+
+        return build_chart(
+            trace_id=trace_id,
+            sql=sql,
+            chart_type=chart_type,
+            x_field=x_field,
+            y_field=y_field,
+            series_field=series_field,
+            title=title,
+            user_prompt=user_prompt or sql,
+            database=selected_database,
+        )
+
+    if name == 'build_dashboard':
+        widgets = arguments.get('widgets')
+        title = arguments.get('title')
+        if not isinstance(widgets, list):
+            raise ValueError('build_dashboard requires "widgets" as list')
+        if title is not None and not isinstance(title, str):
+            raise ValueError('build_dashboard "title" must be string when provided')
+
+        return build_dashboard(
+            trace_id=trace_id,
+            widgets=widgets,
+            title=title,
+            user_prompt=user_prompt or title or 'build dashboard',
+            database=selected_database,
         )
 
     raise ValueError(f'Unknown tool: {name}')
@@ -376,6 +485,9 @@ def run_mcp_payload(
             user_prompt = header_user_prompt
         if user_prompt is not None and not isinstance(user_prompt, str):
             return mcp_error_response(request_id, -32602, '"user_prompt" must be string')
+        call_arguments = dict(arguments)
+        if isinstance(user_prompt, str) and user_prompt.strip():
+            call_arguments['user_prompt'] = user_prompt.strip()
 
         trace_id = trace_id_from_header(x_trace_id)
         started = time.perf_counter()
@@ -387,10 +499,36 @@ def run_mcp_payload(
             transport=transport,
         )
         try:
-            tool_result = call_mcp_tool(tool_name, arguments, trace_id)
+            tool_result = call_mcp_tool(tool_name, call_arguments, trace_id)
         except ValueError as exc:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            _log_tool_call_result(
+                trace_id=trace_id,
+                request_id=request_id,
+                tool_name=tool_name,
+                call_arguments=call_arguments,
+                user_prompt=user_prompt,
+                session_id=session_id,
+                transport=transport,
+                total_ms=elapsed_ms,
+                error_code=-32602,
+                error_message=str(exc),
+            )
             return mcp_error_response(request_id, -32602, str(exc))
         except Exception:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            _log_tool_call_result(
+                trace_id=trace_id,
+                request_id=request_id,
+                tool_name=tool_name,
+                call_arguments=call_arguments,
+                user_prompt=user_prompt,
+                session_id=session_id,
+                transport=transport,
+                total_ms=elapsed_ms,
+                error_code=-32603,
+                error_message='Internal server error',
+            )
             return mcp_error_response(request_id, -32603, 'Internal server error')
         finally:
             total_ms = int((time.perf_counter() - started) * 1000)
@@ -404,6 +542,17 @@ def run_mcp_payload(
             )
 
         client_tool_result = _finalize_tool_result(tool_result, total_ms)
+        _log_tool_call_result(
+            trace_id=trace_id,
+            request_id=request_id,
+            tool_name=tool_name,
+            call_arguments=call_arguments,
+            user_prompt=user_prompt,
+            session_id=session_id,
+            transport=transport,
+            total_ms=total_ms,
+            tool_result=client_tool_result,
+        )
         return {
             'jsonrpc': '2.0',
             'id': request_id,

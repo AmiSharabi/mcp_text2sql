@@ -1,9 +1,11 @@
 import json
+import math
 import os
 import re
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -16,6 +18,7 @@ _LOG_ENGINE_LOCK = threading.Lock()
 _WARNED_KEYS: set[str] = set()
 
 _IDENTIFIER_PATTERN = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+_SENSITIVE_KEYWORDS = ('password', 'secret', 'token', 'api_key', 'apikey', 'authorization')
 
 
 def _now_utc() -> datetime:
@@ -36,14 +39,6 @@ def _truncate_sql_preview(value: str, max_len: int = 400) -> str:
     return text[:max_len] + '...'
 
 
-def _truncate_text(value: str, max_len: int = 1000) -> str:
-    # Normalize whitespace and truncate free text to safe log length.
-    text = ' '.join(value.split())
-    if len(text) <= max_len:
-        return text
-    return text[:max_len] + '...'
-
-
 def _truncate_error(value: str, max_len: int = 2000) -> str:
     # Normalize whitespace and cap long error messages before persistence.
     text = ' '.join(value.split())
@@ -52,31 +47,102 @@ def _truncate_error(value: str, max_len: int = 2000) -> str:
     return text[:max_len] + '...'
 
 
+def _is_sensitive_key(key: Any) -> bool:
+    # Return True when a key name looks like secret-bearing data.
+    key_str = str(key).strip().lower()
+    if not key_str:
+        return False
+    return any(keyword in key_str for keyword in _SENSITIVE_KEYWORDS)
+
+
+def _normalize_datetime(value: datetime) -> str:
+    # Convert datetime to stable ISO-8601 UTC representation.
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def _json_compatible(value: Any) -> Any:
+    # Convert nested values to JSON-safe primitives and redact sensitive keys.
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return str(value)
+        return int(value) if value == value.to_integral_value() else float(value)
+
+    if isinstance(value, datetime):
+        return _normalize_datetime(value)
+
+    if isinstance(value, date):
+        return value.isoformat()
+
+    if isinstance(value, bytes):
+        return value.decode('utf-8', errors='replace')
+
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if _is_sensitive_key(key):
+                continue
+            result[str(key)] = _json_compatible(item)
+        return result
+
+    if isinstance(value, (list, tuple, set)):
+        return [_json_compatible(item) for item in value]
+
+    return str(value)
+
+
 def _sanitize_event(event: dict[str, Any]) -> dict[str, Any]:
     # Remove sensitive fields and apply truncation before logging.
-    clean = dict(event)
+    clean_obj = _json_compatible(event)
+    if not isinstance(clean_obj, dict):
+        clean = {'value': clean_obj}
+    else:
+        clean = clean_obj
 
     if 'sql_preview' in clean and isinstance(clean['sql_preview'], str):
         clean['sql_preview'] = _truncate_sql_preview(clean['sql_preview'])
     if 'user_prompt' in clean and isinstance(clean['user_prompt'], str):
-        clean['user_prompt'] = _truncate_text(clean['user_prompt'])
+        clean['user_prompt'] = clean['user_prompt'].strip()
     if 'error' in clean and isinstance(clean['error'], str):
         clean['error'] = _truncate_error(clean['error'])
-
-    for key in list(clean.keys()):
-        key_l = key.lower()
-        if 'password' in key_l or 'secret' in key_l:
-            clean.pop(key, None)
 
     return clean
 
 
-def _env(name: str, default: str | None = None) -> str:
-    # Read environment variable and fail when required value is absent.
-    value = os.getenv(name, default)
+def _env_non_empty(name: str) -> str | None:
+    # Read environment variable and treat empty/blank values as missing.
+    value = os.getenv(name)
     if value is None:
-        raise ValueError(f'Missing required environment variable: {name}')
+        return None
+    if not value.strip():
+        return None
     return value
+
+
+def _env_prefer(primary: str, secondary: str | None = None, default: str | None = None) -> str:
+    # Resolve env value by primary name, then secondary fallback, then default.
+    primary_value = _env_non_empty(primary)
+    if primary_value is not None:
+        return primary_value
+
+    if secondary is not None:
+        secondary_value = _env_non_empty(secondary)
+        if secondary_value is not None:
+            return secondary_value
+
+    if default is not None:
+        return default
+
+    if secondary is not None:
+        raise ValueError(f'Missing required environment variable: {primary} (or fallback {secondary})')
+    raise ValueError(f'Missing required environment variable: {primary}')
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -129,19 +195,16 @@ def _log_sink_mode() -> str:
 
 def _build_log_db_connection_url() -> str:
     # Build SQLAlchemy MSSQL URL for the logging database connection.
-    driver = _env('LOG_DB_DRIVER', _env('DB_DRIVER'))
-    host = _env('LOG_DB_HOST', _env('DB_HOST'))
-    db_name = _env('LOG_DB_NAME', _env('DB_NAME'))
-    db_user = _env('LOG_DB_USER', _env('DB_USER'))
-    db_password = _env('LOG_DB_PASSWORD', _env('DB_PASSWORD'))
-    encrypt = _env('LOG_DB_ENCRYPT', _env('DB_ENCRYPT', 'yes'))
-    trust_cert = _env(
-        'LOG_DB_TRUST_SERVER_CERTIFICATE',
-        _env('DB_TRUST_SERVER_CERTIFICATE', 'yes'),
-    )
+    driver = _env_prefer('LOG_DB_DRIVER', 'DB_DRIVER')
+    host = _env_prefer('LOG_DB_HOST', 'DB_HOST')
+    db_name = _env_prefer('LOG_DB_NAME', 'DB_NAME')
+    db_user = _env_prefer('LOG_DB_USER', 'DB_USER')
+    db_password = _env_prefer('LOG_DB_PASSWORD', 'DB_PASSWORD')
+    encrypt = _env_prefer('LOG_DB_ENCRYPT', 'DB_ENCRYPT', 'yes')
+    trust_cert = _env_prefer('LOG_DB_TRUST_SERVER_CERTIFICATE', 'DB_TRUST_SERVER_CERTIFICATE', 'yes')
 
     server = host
-    port = _env('LOG_DB_PORT', os.getenv('DB_PORT', '')).strip()
+    port = _env_prefer('LOG_DB_PORT', 'DB_PORT', '').strip()
     if port and '\\' not in host:
         server = f'{host},{port}'
 

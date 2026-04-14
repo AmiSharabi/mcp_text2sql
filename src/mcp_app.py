@@ -8,11 +8,14 @@ from typing import Any, Callable
 
 import uvicorn
 from dotenv import load_dotenv
+from fastapi.encoders import jsonable_encoder
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.mcp_models import (
+    BuildChartRequest,
+    BuildDashboardRequest,
     DownloadResultRequest,
     ExecuteReadonlySqlRequest,
     ExplainReasoningRequest,
@@ -30,7 +33,16 @@ from src.mcp_runtime import (
     sse_event,
     trace_id_from_header,
 )
-from src.tools import download_readonly_sql_result, execute_readonly_sql, explain_reasoning, get_schema, preview_table
+from src.tools import (
+    build_chart,
+    build_dashboard,
+    download_readonly_sql_result,
+    execute_readonly_sql,
+    explain_reasoning,
+    get_schema,
+    list_databases,
+    preview_table,
+)
 
 load_dotenv()
 
@@ -38,6 +50,11 @@ app = FastAPI(title='MCP Text2SQL Server', version='0.1.0')
 DOWNLOADS_DIR = Path(os.getenv('DOWNLOADS_DIR', 'logs/downloads'))
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount('/downloads', StaticFiles(directory=str(DOWNLOADS_DIR)), name='downloads')
+
+
+def _json_safe(value: Any) -> Any:
+    # Convert nested payloads into JSON-serializable structures (Decimal/datetime/etc.).
+    return jsonable_encoder(value)
 
 
 def _run_http_tool_endpoint(
@@ -78,7 +95,9 @@ def root() -> dict[str, str]:
         'message': (
             'Server is running. Use POST /mcp for MCP tools/list and tools/call '
             'or GET /sse + POST /messages for SSE transport '
-            'or POST on /tools/get_schema, /tools/execute_readonly_sql, /tools/explain_reasoning, /tools/preview_table'
+            'or POST on /tools/get_schema, /tools/execute_readonly_sql, /tools/explain_reasoning, '
+            '/tools/preview_table, /tools/download_result, /tools/build_chart, /tools/build_dashboard, '
+            '/tools/list_databases'
         ),
     }
 
@@ -151,7 +170,7 @@ async def sse_endpoint(request: Request) -> StreamingResponse:
                     break
                 try:
                     message = await asyncio.wait_for(queue.get(), timeout=15)
-                    yield sse_event('message', json.dumps(message, ensure_ascii=True))
+                    yield sse_event('message', json.dumps(_json_safe(message), ensure_ascii=True))
                 except asyncio.TimeoutError:
                     yield ': keepalive\n\n'
         finally:
@@ -179,11 +198,11 @@ async def post_sse_rpc(
         payload = await request.json()
     except Exception:
         response = mcp_error_response(None, -32700, 'Invalid JSON')
-        return JSONResponse(response, status_code=200)
+        return JSONResponse(_json_safe(response), status_code=200)
 
     if not isinstance(payload, dict):
         response = mcp_error_response(None, -32600, 'Invalid request')
-        return JSONResponse(response, status_code=200)
+        return JSONResponse(_json_safe(response), status_code=200)
 
     method = payload.get('method')
     session_id_header = request.headers.get('mcp-session-id')
@@ -206,7 +225,7 @@ async def post_sse_rpc(
     if isinstance(method, str) and method.startswith('notifications/'):
         return Response(status_code=202, headers=response_headers)
 
-    return JSONResponse(response, status_code=200, headers=response_headers)
+    return JSONResponse(_json_safe(response), status_code=200, headers=response_headers)
 
 
 @app.post('/messages')
@@ -238,7 +257,7 @@ async def post_sse_message(
             transport='sse',
         )
 
-    await queue.put(response)
+    await queue.put(_json_safe(response))
     return {'ok': True}
 
 
@@ -246,6 +265,7 @@ async def post_sse_message(
 @app.post('/tools/get_schema/')
 def post_get_schema(
     request: Request,
+    database: str | None = None,
     x_trace_id: str | None = Header(default=None, alias='x-trace-id'),
 ) -> dict[str, Any]:
     # Execute the get_schema tool over plain HTTP endpoint.
@@ -255,7 +275,11 @@ def post_get_schema(
         x_trace_id=x_trace_id,
         tool_name='get_schema',
         user_prompt=req_prompt,
-        runner=lambda trace_id, user_prompt: get_schema(trace_id, user_prompt=user_prompt),
+        runner=lambda trace_id, user_prompt: get_schema(
+            trace_id,
+            user_prompt=user_prompt,
+            database=database,
+        ),
     )
 
 
@@ -284,6 +308,7 @@ def post_execute_readonly_sql(
             trace_id=trace_id,
             sql=body.sql,
             user_prompt=user_prompt,
+            database=body.database,
         ),
     )
 
@@ -345,6 +370,7 @@ def post_preview_table(
             table_name=body.table_name,
             schema_name=body.schema_name,
             user_prompt=user_prompt,
+            database=body.database,
         ),
     )
 
@@ -376,6 +402,7 @@ def post_download_result(
             file_name=body.file_name,
             download_mode=body.download_mode,
             user_prompt=user_prompt,
+            database=body.database,
         ),
     )
 
@@ -385,6 +412,99 @@ def post_download_result(
 def get_download_result_hint() -> dict[str, str]:
     # Explain that the download_result endpoint requires POST.
     return post_only_hint('download_result')
+
+
+@app.post('/tools/build_chart')
+@app.post('/tools/build_chart/')
+def post_build_chart(
+    request: Request,
+    body: BuildChartRequest,
+    x_trace_id: str | None = Header(default=None, alias='x-trace-id'),
+) -> dict[str, Any]:
+    # Execute the build_chart tool over plain HTTP endpoint.
+    req_prompt = body.title or body.sql
+    return _run_http_tool_endpoint(
+        request=request,
+        x_trace_id=x_trace_id,
+        tool_name='build_chart',
+        user_prompt=req_prompt,
+        runner=lambda trace_id, user_prompt: build_chart(
+            trace_id=trace_id,
+            sql=body.sql,
+            chart_type=body.chart_type,
+            x_field=body.x_field,
+            y_field=body.y_field,
+            series_field=body.series_field,
+            title=body.title,
+            user_prompt=user_prompt,
+            database=body.database,
+        ),
+    )
+
+
+@app.get('/tools/build_chart')
+@app.get('/tools/build_chart/')
+def get_build_chart_hint() -> dict[str, str]:
+    # Explain that the build_chart endpoint requires POST.
+    return post_only_hint('build_chart')
+
+
+@app.post('/tools/build_dashboard')
+@app.post('/tools/build_dashboard/')
+def post_build_dashboard(
+    request: Request,
+    body: BuildDashboardRequest,
+    x_trace_id: str | None = Header(default=None, alias='x-trace-id'),
+) -> dict[str, Any]:
+    # Execute the build_dashboard tool over plain HTTP endpoint.
+    req_prompt = body.title or 'build dashboard'
+    return _run_http_tool_endpoint(
+        request=request,
+        x_trace_id=x_trace_id,
+        tool_name='build_dashboard',
+        user_prompt=req_prompt,
+        runner=lambda trace_id, user_prompt: build_dashboard(
+            trace_id=trace_id,
+            widgets=body.widgets,
+            title=body.title,
+            user_prompt=user_prompt,
+            database=body.database,
+        ),
+    )
+
+
+@app.get('/tools/build_dashboard')
+@app.get('/tools/build_dashboard/')
+def get_build_dashboard_hint() -> dict[str, str]:
+    # Explain that the build_dashboard endpoint requires POST.
+    return post_only_hint('build_dashboard')
+
+
+@app.post('/tools/list_databases')
+@app.post('/tools/list_databases/')
+def post_list_databases(
+    request: Request,
+    x_trace_id: str | None = Header(default=None, alias='x-trace-id'),
+) -> dict[str, Any]:
+    # Execute the list_databases tool over plain HTTP endpoint.
+    req_prompt = 'list databases'
+    return _run_http_tool_endpoint(
+        request=request,
+        x_trace_id=x_trace_id,
+        tool_name='list_databases',
+        user_prompt=req_prompt,
+        runner=lambda trace_id, user_prompt: list_databases(
+            trace_id=trace_id,
+            user_prompt=user_prompt,
+        ),
+    )
+
+
+@app.get('/tools/list_databases')
+@app.get('/tools/list_databases/')
+def get_list_databases_hint() -> dict[str, str]:
+    # Explain that the list_databases endpoint requires POST.
+    return post_only_hint('list_databases')
 
 
 def main() -> None:
