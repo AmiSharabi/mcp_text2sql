@@ -1,6 +1,17 @@
 .env
-logs/
 __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Runtime/event data artifacts (do not commit)
+logs/*.jsonl
+logs/*.csv
+logs/*.xlsx
+logs/downloads/
+logs/__pycache__/
+test/logs/
+
+# Keep SQL setup/migration scripts in git
+!logs/sql/
+!logs/sql/*.sql
