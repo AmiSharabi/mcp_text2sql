@@ -117,9 +117,18 @@ Cloud models cannot call `127.0.0.1` directly.
   - set `.env`:
     - `LOG_SINK=sql` (SQL only) or `LOG_SINK=both` (SQL + JSONL)
     - set dedicated SQL log connection via `LOG_DB_*` (recommended)
-      - `LOG_DB_NAME=McpObservability`
-      - `LOG_DB_USER=<logging_writer_user>`
-      - `LOG_DB_PASSWORD=<logging_writer_password>`
+      - `LOG_DB_HOST`, `LOG_DB_PORT`, `LOG_DB_NAME`
+      - `LOG_DB_USER`, `LOG_DB_PASSWORD`
+      - `LOG_DB_DRIVER`, `LOG_DB_ENCRYPT`, `LOG_DB_TRUST_SERVER_CERTIFICATE`
+      - minimal recommended:
+        - `LOG_DB_NAME=McpObservability`
+        - `LOG_DB_USER=<logging_writer_user>`
+        - `LOG_DB_PASSWORD=<logging_writer_password>`
+    - `LOG_DB_*` behavior:
+      - used only when `LOG_SINK` is `sql` or `both`
+      - per field fallback: if `LOG_DB_*` is missing/empty, logger falls back to matching `DB_*`
+      - fallback is per variable (not all-or-nothing), so partial `LOG_DB_*` config is valid
+      - if `LOG_DB_HOST` is instance-based (example: `AMI02\\SQLEXPRESS`), `LOG_DB_PORT` is ignored
     - default table target: `LOG_DB_SCHEMA=mcp_logging`, `LOG_DB_TABLE=events`
   - retention:
     - schedule SQL Agent job to execute:
